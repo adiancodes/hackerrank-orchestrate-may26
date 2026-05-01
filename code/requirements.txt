@@ -1,4 +1,4 @@
-google-generativeai
+openai
 faiss-cpu
 sentence-transformers
 rank_bm25

@@ -1,7 +1,9 @@
 import os
 import json
+import time
+import re
 from dotenv import load_dotenv
-import google.generativeai as genai
+from openai import OpenAI
 from pydantic import BaseModel, Field
 
 # Import hybrid_search from retriever
@@ -10,16 +12,15 @@ from retriever import hybrid_search
 # Load environment variables
 load_dotenv()
 
-# Configure Gemini API
-API_KEY = os.getenv("GEMINI_API_KEY")
+# Configure OpenRouter API
+API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
-    raise ValueError("GEMINI_API_KEY not found in environment variables. Please check your .env file.")
+    raise ValueError("OPENROUTER_API_KEY not found in environment variables. Please check your .env file.")
 
-genai.configure(api_key=API_KEY)
+client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=API_KEY)
 
-# Initialize the model
-MODEL_NAME = "gemini-3.1-flash-lite-preview" 
-model = genai.GenerativeModel(MODEL_NAME)
+# Initialize the model (UPDATED TO GPT-OSS)
+MODEL_NAME = "openai/gpt-oss-120b:free"
 
 class TicketResponse(BaseModel):
     status: str = Field(description="Must be 'replied' or 'escalated'")
@@ -33,22 +34,17 @@ class ReflectionResponse(BaseModel):
     reasoning: str = Field(description="Explanation of why it is or isn't valid.")
 
 def process_ticket(issue: str, subject: str, company: str) -> dict:
-    """
-    Process a single support ticket and return a structured dictionary.
-    Includes a two-step generation and self-correction reflection layer.
-    """
     try:
-        # 1. Search for context
         company_str = company if company and str(company).lower() not in ["none", "nan"] else ""
         subject_str = subject if subject and str(subject).lower() not in ["none", "nan"] else ""
         issue_str = issue if issue else ""
         
         query = f"{company_str} {subject_str} {issue_str}".strip()
-        context = hybrid_search(query, top_k=10)
+        context = hybrid_search(query, top_k=5)
         
-        # 2. Prompting
         system_prompt = (
             "You are an AI triage agent for HackerRank, Claude, and Visa.\n"
+            'You must return ONLY a raw JSON object matching this structure: {"status": "...", "product_area": "...", "response": "...", "justification": "...", "request_type": "..."}\n'
             "Read the user's issue and the retrieved context below.\n"
             "Base your answer ONLY on the provided context.\n\n"
             "CRITICAL RULES:\n"
@@ -56,82 +52,93 @@ def process_ticket(issue: str, subject: str, company: str) -> dict:
             "2. Write a concise justification for your decision.\n"
             "3. Ensure the product_area is mapped to the most specific sub-folder from our data (e.g., 'billing', 'troubleshooting', 'account-management').\n"
             "4. The status field MUST be exactly 'replied' or 'escalated'.\n"
-            "5. The request_type field MUST be exactly 'product_issue', 'feature_request', 'bug', or 'invalid'. Use these strict definitions:\n"
-            "   - billing: Any ticket mentioning 'refund', 'payment', 'charge', 'order ID', 'money', 'subscription pause', or 'pricing'.\n"
-            "   - bug: Any ticket mentioning 'not working', 'down', 'failing', 'error', 'connectivity issues', or 'site inaccessible'.\n"
-            "   - feature_request: Any ticket asking for new capabilities, setup of new integrations (like LTI keys), or 'planning to use' something not yet set up.\n"
-            "   - product_issue: General 'how-to' questions, setup guidance, account settings, and usage questions that are NOT bugs or billing.\n"
-            "   - invalid: Only for nonsensical, empty, or completely off-topic queries (e.g., questions about movies or unrelated celebrities).\n"
-            "   IMPORTANT: Prioritize billing and bug categories if their respective keywords or intents are present.\n\n"
+            "5. The request_type field MUST be chosen using this STRICT EVALUATION ORDER:\n"
+            "   - STEP 1: Is it a 'bug'? (Look for keywords: error, broken, site down, failing, crashed, 404). If yes, return 'bug'.\n"
+            "   - STEP 2: Is it a 'feature_request'? (Look for keywords: new feature, wish, please add, planning to use, integration setup). If yes, return 'feature_request'.\n"
+            "   - STEP 3: Is it 'invalid'? (Spam, nonsensical, completely empty, or off-topic like movies/celebrities). If yes, return 'invalid'.\n"
+            "   - STEP 4: If and ONLY if it fails ALL of the above checks, return 'product_issue' (Use this for refunds, billing, score disputes, how-tos, and account settings).\n\n"
             f"--- CONTEXT ---\n{context}\n--- END CONTEXT ---\n\n"
             f"User Issue: {issue}\n"
             f"Subject: {subject}\n"
             f"Company: {company}\n"
         )
         
-        # 3. Generation using structured output
-        result = model.generate_content(
-            system_prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                response_schema=TicketResponse
-            )
-        )
+        for attempt in range(2):
+            try:
+                result = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[{"role": "system", "content": system_prompt}],
+                    temperature=0.0,
+                    timeout=60
+                )
+                break
+            except Exception as e:
+                if attempt == 0:
+                    print("API Timeout, retrying in 5s...")
+                    time.sleep(5)
+                else:
+                    print("API Failed, using fallback")
+                    raise e
         
-        # Parse the JSON response
-        response_text = result.text
+        text = result.choices[0].message.content
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        response_text = match.group(0) if match else text
         data = json.loads(response_text)
         
-        # 4. Self-Correction Reflection Layer
         reflection_prompt = (
             "You are an auditing AI. Review the following proposed response to a user ticket.\n"
             "Verify three things:\n"
             "1. Is the proposed response 100% grounded ONLY in the provided context?\n"
             "2. Does the company mentioned in the user's ticket match the company in the retrieved documentation?\n"
-            "   CRITICAL EXCEPTION: If the company name in the ticket is a reasonable synonym for the context (e.g., 'Claude' vs 'Anthropic' or 'HackerRank' vs 'HackerRank Tech'), do NOT escalate for a mismatch. Only escalate for a company mismatch if the context is clearly for a completely different entity (e.g., using Visa context for a Claude ticket).\n"
-            "3. Is the request_type the most accurate choice based on these definitions?\n"
-            "   - billing: refund, payment, charge, order ID, money, subscription pause, pricing.\n"
-            "   - bug: not working, down, failing, error, connectivity issues, site inaccessible.\n"
-            "   - feature_request: new capabilities, setup of new integrations, planning to use something new.\n"
-            "   - product_issue: general how-to, setup, account settings, usage that are NOT bugs/billing.\n"
-            "   - invalid: nonsensical, empty, off-topic.\n\n"
+            "   CRITICAL EXCEPTION: If the company name is a reasonable synonym (e.g., 'Claude' vs 'Anthropic'), do NOT escalate.\n"
+            "3. Is the request_type accurate based on these definitions: bug, feature_request, invalid, product_issue?\n\n"
             f"User Issue: {issue}\n"
             f"Company: {company}\n"
             f"--- PROVIDED CONTEXT ---\n{context}\n--- END CONTEXT ---\n"
             f"--- PROPOSED RESPONSE ---\n{data.get('response')}\n"
             f"--- PROPOSED REQUEST TYPE ---\n{data.get('request_type')}\n--- END PROPOSED RESPONSE ---\n\n"
-            "If it is fully grounded, companies match (or are reasonable synonyms), AND the request_type is accurate, output is_grounded: true.\n"
-            "If there is any hallucination, assumption, severe company mismatch, or inaccurate request_type, output is_grounded: false."
+            "If grounded, companies match, and request_type accurate, output: true.\n"
+            "Otherwise, output: false.\n"
+            'You must return ONLY a raw JSON object matching this structure: {"is_grounded": true/false, "reasoning": "..."}'
         )
         
-        reflection_result = model.generate_content(
-            reflection_prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                response_schema=ReflectionResponse
-            )
-        )
+        for attempt in range(2):
+            try:
+                reflection_result = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[{"role": "system", "content": reflection_prompt}],
+                    temperature=0.0,
+                    timeout=60
+                )
+                break
+            except Exception as e:
+                if attempt == 0:
+                    print("API Timeout, retrying in 5s...")
+                    time.sleep(5)
+                else:
+                    print("API Failed, using fallback")
+                    raise e
         
-        reflection_data = json.loads(reflection_result.text)
+        ref_text = reflection_result.choices[0].message.content
+        ref_match = re.search(r'\{.*\}', ref_text, re.DOTALL)
+        reflection_text = ref_match.group(0) if ref_match else ref_text
+        reflection_data = json.loads(reflection_text)
         
-        # Override result if reflection fails
-        if not reflection_data.get("is_grounded", False):
+        is_grounded = reflection_data.get("is_grounded", False)
+        if str(is_grounded).lower() not in ["true", "1", "yes"]:
             data["status"] = "escalated"
-            data["response"] = "Escalated to human support"
-            data["justification"] = "Self-correction triggered: " + reflection_data.get("reasoning", "Potential hallucination or company mismatch detected.")
+            data["justification"] = "Self-correction triggered: " + str(reflection_data.get("reasoning", "Potential hallucination detected."))
         
-        # Ensure fallback for strictly typed enums if LLM hallucinations happen
-        if data.get("status") not in ["replied", "escalated"]:
-            data["status"] = "escalated"
+        status_val = str(data.get("status", "")).lower().strip()
+        data["status"] = status_val if status_val in ["replied", "escalated"] else "escalated"
             
         valid_request_types = ["product_issue", "feature_request", "bug", "invalid"]
-        if data.get("request_type") not in valid_request_types:
-            data["request_type"] = "invalid"
+        req_type = str(data.get("request_type", "")).lower().strip()
+        data["request_type"] = req_type if req_type in valid_request_types else "invalid"
             
         return data
 
     except Exception as e:
-        # Fallback mechanism to ensure evaluation loop never crashes
         print(f"Error processing ticket: {e}")
         return {
             "status": "escalated",
@@ -142,11 +149,6 @@ def process_ticket(issue: str, subject: str, company: str) -> dict:
         }
 
 if __name__ == "__main__":
-    # Test execution
     test_issue = "How do I change my profile picture on Claude?"
-    test_subject = "Profile Settings"
-    test_company = "Claude"
-    
-    print("Testing process_ticket...")
-    result = process_ticket(test_issue, test_subject, test_company)
+    result = process_ticket(test_issue, "Profile Settings", "Claude")
     print(json.dumps(result, indent=2))

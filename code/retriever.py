@@ -3,6 +3,7 @@ import pickle
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
+from rank_bm25 import BM25Okapi
 
 # Paths configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

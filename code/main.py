@@ -28,7 +28,7 @@ def main():
         return
 
     # Normalize column names to lowercase to be case-insensitive
-    df.columns = df.columns.str.lower()
+    df.columns = df.columns.str.strip().str.lower()
 
     total_tickets = len(df)
     print(f"Loaded {total_tickets} tickets for processing.")
@@ -40,6 +40,7 @@ def main():
         # Wrap in tqdm for real-time progress bar
         for idx, row in tqdm(df.iterrows(), total=total_tickets, desc="Processing Tickets"):
             # Input Handling: Extract and handle missing/NaN values
+        
             issue = str(row.get('issue', ''))
             subject = str(row.get('subject', ''))
             company = str(row.get('company', ''))
@@ -58,7 +59,7 @@ def main():
             
             # Rate Limiting (CRITICAL) - 15 RPM limits -> 4s between calls
             if idx < total_tickets - 1:
-                time.sleep(4)
+                time.sleep(9)
                 
     except KeyboardInterrupt:
         print("\nProcess interrupted by user. Saving progress...")
