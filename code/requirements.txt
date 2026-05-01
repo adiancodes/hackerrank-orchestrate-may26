@@ -1,0 +1,9 @@
+google-generativeai
+faiss-cpu
+sentence-transformers
+rank_bm25
+langchain-text-splitters
+pandas
+tqdm
+pydantic
+python-dotenv
