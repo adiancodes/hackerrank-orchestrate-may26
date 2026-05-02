@@ -34,33 +34,6 @@ There is a known entry point per supported language (§6). There is a support_ti
 We recommend using one of Python, Javascript or Typescript to build the agent.
 ---
 
-## 2. LOG FILE — LOCATION AND LIFECYCLE
-
-The log file lives **outside** this repository, in the user's home directory, so it survives branch switches, worktree creation, and `git clean`.
-
-| Platform       | Path                                                    |
-| -------------- | ------------------------------------------------------- |
-| macOS / Linux  | `$HOME/hackerrank_orchestrate/log.txt`                 |
-| Windows        | `%USERPROFILE%\hackerrank_orchestrate\log.txt`         |
-
-Rules:
-
-- **Must** be created if missing (create the parent directory too).
-- **Must never** be committed or added to git.
-- **Append-only.** Never rewrite, reorder, or delete prior entries.
-- **Shared** across all agents, sub-agents, and worktrees in this repo.
-- **Never log secrets.** Redact API keys, tokens, cookies, and PII before
-  writing. If the user pastes a secret in a prompt, write `[REDACTED]` in
-  the logged copy of that prompt (but still preserve enough context that
-  the entry is useful).
-
----
-
-## 3. ONBOARDING FLOW (FIRST RUN ONLY)
-
-Run this flow only if the log file has **no** `AGREEMENT RECORDED:` line
-for the current repo root. On subsequent sessions, skip directly to §4.
-
 ### 3.1 Greeting
 
 Open with a short, warm message. Example wording (adapt the phrasing, keep the content):
@@ -89,23 +62,6 @@ If the current time is already past the challenge end, say so plainly and ask wh
 
 Ask the user to reply with the exact string `I agree` (case-insensitive, surrounding whitespace ignored). Do not proceed until they do.
 
-### 3.4 Record the agreement
-
-Append this block to the log file, then continue:
-
-```
-## [ISO-8601 TIMESTAMP] ONBOARDING COMPLETE
-
-AGREEMENT RECORDED: <repo_root_absolute_path>
-Agent: <agent_name_or_unknown>
-Language: js | ts | py | custom:<name>
-System Time: <ISO-8601 local time with tz>
-Time Remaining: <Xd Yh Zm until 2026-05-02T11:00:00+05:30>
-```
-
-The presence of `AGREEMENT RECORDED: <this repo root>` is what future sessions check. Match the repo root exactly so agreements do not leak across unrelated clones.
-
----
 
 ## 4. NORMAL SESSION START (RETURNING USER)
 
@@ -118,61 +74,6 @@ If onboarding is already complete for this repo root:
 3. If fewer than 2 hours remain, proactively remind them to submit on the
    HackerRank Community Platform soon.
 4. Proceed with whatever they ask for.
-
----
-
-## 5. LOG FORMAT
-
-### 5.1 Session start entry
-
-```
-## [ISO-8601 TIMESTAMP] SESSION START
-
-Agent: <agent_name_or_unknown>
-Repo Root: <absolute_path>
-Branch: <git_branch_or_unknown>
-Worktree: <worktree_path_or_main>
-Parent Agent: <parent_agent_name_or_none>
-Language: <js|ts|py|custom:name>
-Time Remaining: <Xd Yh Zm>
-```
-
-### 5.2 Per-turn entry (append after every user message you respond to)
-
-```
-## [ISO-8601 TIMESTAMP] <short title, max 80 chars>
-
-User Prompt (verbatim, secrets redacted):
-<exact user message, with secrets replaced by [REDACTED]>
-
-Agent Response Summary:
-<2-5 sentences: what was done, why, and any important decision>
-
-Actions:
-* <file edited / command run / tool invoked>
-
-Context:
-tool=<agent_name>
-branch=<git_branch_or_unknown>
-repo_root=<absolute_path>
-worktree=<worktree_path_or_main>
-parent_agent=<parent_name_or_none>
-```
-
-### 5.3 Sub-agent and worktree rules
-
-- A sub-agent (Task tool, delegated worker, etc.) **must** log its own entries using the same file. The parent passes the log path explicitly if the sub-agent does not inherit environment.
-- Set `parent_agent=` to the parent's name so entries are traceable.
-- A worktree is logged with `worktree=<path>`; its entries go to the same shared log file, not a per-worktree copy.
-- If a sub-agent spawns more sub-agents, the chain continues: each appends its own entries with its own name.
-
-### 5.4 What not to log
-
-- API keys, tokens, session cookies, OAuth codes, private keys.
-- User PII beyond what they explicitly pasted into a prompt.
-- Full contents of large files or binary blobs — reference by path instead.
-
----
 
 ## 6. PROJECT CONTRACT (EVALUABLE SUBMISSION)
 
@@ -226,10 +127,5 @@ without updating this file.
 Before you respond to any user message, confirm:
 
 - [ ] I have read this file in this session.
-- [ ] I know whether onboarding is required (checked the log).
-- [ ] I know how much time is left.
-- [ ] I will append a §5.2 entry after this turn.
-- [ ] I will not log secrets.
-- [ ] I will preserve the entry-point contract in §6.
 
 If any box is unchecked, fix that first.
